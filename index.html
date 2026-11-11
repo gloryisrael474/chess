@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chidixess</title>
+<style>
+:root{--bg:#1b2420;--ink:#f1ead8;--light:#e9dfc4;--dark:#5f7f66;--accent:#e3a63b;--muted:#9fb0a2;--bs:min(calc(100vw - 24px),496px)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:Georgia,"Times New Roman",serif}
+main{max-width:520px;margin:0 auto;padding:16px 12px 40px}
+h1{font-size:2.2rem;margin:10px 0 2px;font-weight:700}
+.sub{margin:0 0 22px;color:var(--muted)}
+button,input{font:inherit;border-radius:10px;border:2px solid var(--accent);padding:13px 16px}
+button{background:var(--accent);color:#2a1d00;font-weight:700;cursor:pointer}
+button.ghost{background:transparent;color:var(--ink);border-color:var(--muted)}
+input{background:#10171400;color:var(--ink);text-transform:uppercase;letter-spacing:.2em;width:100%;text-align:center}
+.stack{display:grid;gap:12px}
+.err{color:#f0a08a;min-height:1.4em;margin-top:10px}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:8px 0;min-height:2.6em}
+#status{font-size:1.1rem}
+.tag{color:var(--muted);font-size:.95rem}
+#board{width:var(--bs);height:var(--bs);display:grid;grid-template-columns:repeat(8,1fr);border:3px solid #0d1311;border-radius:6px;overflow:hidden}
+.sq{position:relative;display:flex;align-items:center;justify-content:center;font-size:calc(var(--bs)/8*.78);line-height:1;user-select:none}
+.sq.l{background:var(--light)}.sq.d{background:var(--dark)}
+.sq.last{box-shadow:inset 0 0 0 100px #e3a63b66}
+.sq.sel{box-shadow:inset 0 0 0 100px #e3a63baa}
+.sq.chk{box-shadow:inset 0 0 0 100px #d8503a99}
+.sq.opt::after{content:"";position:absolute;width:30%;height:30%;border-radius:50%;background:#1b242055}
+.sq.opt.cap::after{width:86%;height:86%;background:none;border:4px solid #1b242066}
+.w{color:#fffdf5;text-shadow:0 0 2px #000,0 0 2px #000,0 1px 1px #000}
+.b{color:#171717;text-shadow:0 0 1px #fff7}
+.row{display:flex;gap:10px;margin-top:14px}.row button{flex:1}
+.hide{display:none}
+.code{letter-spacing:.25em;font-weight:700;color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Chidixess</h1>
+  <p class="sub">Play chess with a friend on a different phone.</p>
+
+  <section id="lobby" class="stack">
+    <button id="create">Start a new game</button>
+    <p class="tag" style="text-align:center;margin:4px 0">or join with a game code</p>
+    <input id="codeIn" maxlength="5" placeholder="CODE" autocomplete="off">
+    <button id="join" class="ghost">Join game</button>
+    <div class="err" id="err"></div>
+  </section>
+
+  <section id="game" class="hide">
+    <div class="bar"><span class="tag" id="opp"></span><span class="tag">Code <span class="code" id="codeShow"></span></span></div>
+    <div id="board"></div>
+    <div class="bar"><span id="status"></span></div>
+    <div class="bar"><span class="tag" id="me"></span></div>
+    <div class="row"><button id="invite">Share invite link</button><button id="leave" class="ghost">Leave</button></div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-app-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-database-compat.min.js"></script>
+<script>
+firebase.initializeApp({
+  apiKey: "AIzaSyDs4Sxd059cI2KPzgIXSNcfMZrGF_kfugs",
+  authDomain: "chidixess.firebaseapp.com",
+  databaseURL: "https://chidixess-default-rtdb.firebaseio.com",
+  projectId: "chidixess"
+});
+const db = firebase.database();
+const $ = s => document.querySelector(s);
+const GL = {p:'♟',r:'♜',n:'♞',b:'♝',q:'♛',k:'♚'};
+let chess = new Chess(), ref = null, code = '', role = 's', joined = false, sel = null, legal = [], last = null;
+
+function store(k, v){ try{ if(v===undefined) return localStorage.getItem(k); localStorage.setItem(k, v);}catch(e){ return null; } }
+function err(t){ $('#err').textContent = t || ''; }
+
+function newCode(){
+  const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let c = '';
+  for(let i=0;i<5;i++) c += a[Math.floor(Math.random()*a.length)];
+  return c;
+}
+
+async function create(){
+  err(); const c = newCode();
+  try{
+    await db.ref('games/'+c).set({fen: new Chess().fen(), white: true, made: Date.now()});
+    store('role_'+c, 'w'); enter(c, 'w');
+  }catch(e){ err('Could not reach the database. Check your internet and the database rules.'); }
+}
+
+async function join(c){
+  err(); c = (c||'').trim().toUpperCase();
+  if(c.length !== 5){ err('Enter the 5-character game code.'); return; }
+  try{
+    const r = db.ref('games/'+c), snap = await r.once('value');
+    if(!snap.exists()){ err('No game found with that code.'); return; }
+    let rl = store('role_'+c);
+    if(!rl){
+      const res = await r.child('black').transaction(v => v ? undefined : true);
+      rl = res.committed ? 'b' : 's';
+      store('role_'+c, rl);
+    }
+    enter(c, rl);
+  }catch(e){ err('Could not join. Check your internet connection.'); }
+}
+
+function enter(c, rl){
+  code = c; role = rl; ref = db.ref('games/'+c); sel = null; legal = []; last = null; joined = false;
+  $('#lobby').classList.add('hide'); $('#game').classList.remove('hide');
+  $('#codeShow').textContent = c;
+  $('#me').textContent = rl==='w' ? 'You play White' : rl==='b' ? 'You play Black' : 'You are watching';
+  $('#opp').textContent = rl==='w' ? 'Black' : rl==='b' ? 'White' : 'Spectator view';
+  history.replaceState(null,'','#'+c);
+  ref.on('value', s => {
+    const d = s.val(); if(!d) return;
+    chess.load(d.fen); last = d.last || null; joined = !!d.black; sel = null; legal = []; render();
+  });
+}
+
+function over(){ return chess.game_over(); }
+
+function statusText(){
+  const turn = chess.turn();
+  if(chess.in_checkmate()){
+    if(role==='s') return 'Checkmate. ' + (turn==='w' ? 'Black' : 'White') + ' wins.';
+    return turn===role ? 'Checkmate. You lose.' : 'Checkmate. You win!';
+  }
+  if(chess.in_stalemate()) return 'Stalemate. The game is a draw.';
+  if(chess.in_draw()) return 'The game is a draw.';
+  if(!joined) return 'Waiting for your opponent. Share the invite link.';
+  const chk = chess.in_check() ? ' Check!' : '';
+  if(role==='s') return (turn==='w' ? 'White' : 'Black') + ' to move.' + chk;
+  return (turn===role ? 'Your move.' : 'Opponent’s move.') + chk;
+}
+
+function render(){
+  const b = $('#board'); b.innerHTML = '';
+  const flip = role==='b';
+  const targets = {}; legal.forEach(m => targets[m.to] = m);
+  let kingSq = null;
+  if(chess.in_check()){
+    chess.board().forEach((row,r) => row.forEach((p,f) => { if(p && p.type==='k' && p.color===chess.turn()) kingSq = 'abcdefgh'[f] + (8-r); }));
+  }
+  for(let r=0;r<8;r++) for(let f=0;f<8;f++){
+    const file = flip ? 7-f : f, rank = flip ? r+1 : 8-r;
+    const sq = 'abcdefgh'[file] + rank;
+    const el = document.createElement('div');
+    el.className = 'sq ' + ((file+rank)%2===0 ? 'd' : 'l');
+    el.dataset.sq = sq;
+    if(last && (last.from===sq || last.to===sq)) el.classList.add('last');
+    if(sq===kingSq) el.classList.add('chk');
+    if(sq===sel) el.classList.add('sel');
+    if(targets[sq]){ el.classList.add('opt'); if(chess.get(sq)) el.classList.add('cap'); }
+    const p = chess.get(sq);
+    if(p){ const s = document.createElement('span'); s.className = p.color; s.textContent = GL[p.type] + '\uFE0E'; el.appendChild(s); }
+    b.appendChild(el);
+  }
+  $('#status').textContent = statusText();
+}
+
+$('#board').addEventListener('click', e => {
+  const el = e.target.closest('.sq'); if(!el) return;
+  const sq = el.dataset.sq;
+  if(role==='s' || !joined || over() || chess.turn()!==role) return;
+  if(sel){
+    const m = legal.find(x => x.to===sq);
+    if(m){
+      chess.move({from:m.from, to:m.to, promotion:'q'});
+      last = {from:m.from, to:m.to}; sel = null; legal = [];
+      ref.update({fen: chess.fen(), last: last, at: Date.now()});
+      render(); return;
+    }
+  }
+  const p = chess.get(sq);
+  if(p && p.color===role){ sel = sq; legal = chess.moves({square:sq, verbose:true}); }
+  else { sel = null; legal = []; }
+  render();
+});
+
+$('#create').onclick = create;
+$('#join').onclick = () => join($('#codeIn').value);
+$('#codeIn').addEventListener('keydown', e => { if(e.key==='Enter') join(e.target.value); });
+$('#leave').onclick = () => {
+  if(ref) ref.off(); ref = null; chess = new Chess();
+  history.replaceState(null,'',location.pathname);
+  $('#game').classList.add('hide'); $('#lobby').classList.remove('hide'); err();
+};
+$('#invite').onclick = async () => {
+  const url = location.origin + location.pathname + '#' + code;
+  const text = 'Play chess with me on Chidixess. Game code: ' + code;
+  try{
+    if(navigator.share){ await navigator.share({title:'Chidixess', text, url}); }
+    else { await navigator.clipboard.writeText(url); $('#invite').textContent = 'Link copied'; setTimeout(()=>$('#invite').textContent='Share invite link',1800); }
+  }catch(e){ prompt('Copy this link:', url); }
+};
+
+if(location.hash.length > 1) join(location.hash.slice(1));
+</script>
+</body>
+</html>
